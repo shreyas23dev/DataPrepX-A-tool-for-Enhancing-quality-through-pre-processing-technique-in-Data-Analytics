@@ -22,7 +22,7 @@ IPython: Jupyter-specific imports for displaying links and HTML content.
 ## License
 This project is licensed under the GPLv3 License - see the [C:\Users\Admin\Downloads\LICENSE.txt](LICENSE) file for details.
 ## Authors
-- **Shreyas. A ** - *Developer* - [Shreyas.A](https://github.com/shr23-collab)
+- **Shreyas. A** - *Developer* - [Shreyas.A](https://github.com/shr23-collab)
 
 For questions or support, contact [shreyas07023@gmail.com](mailto:shreyas07023@gmail.com).
 
