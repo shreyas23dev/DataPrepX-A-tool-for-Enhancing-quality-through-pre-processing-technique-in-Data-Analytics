@@ -20,7 +20,7 @@ IPython: Jupyter-specific imports for displaying links and HTML content.
 -**IPython**: For enhanced interactive Python. Install it using `pip install ipython`.
 
 ## License
-This project is licensed under the GPLv3 License - see the [<<http://www.gnu.org/philosophy/why-not-lgpl.html>>.](LICENSE) file for details.
+This project is licensed under the GPLv3 License - see the [GPLv3 License](LICENSE) file for details.
 ## Authors
 - **Shreyas. A** - *Developer* - [Shreyas.A](https://github.com/shr23-collab)
 
