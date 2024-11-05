@@ -2,7 +2,7 @@
 Enhancing data quality through pre-processing techniques is crucial in data analytics. This project focuses on transforming raw data into a structured format suitable for analysis, modeling, and machine learning.
 ##The motivation behind this project is to address the challenges associated with raw data, which often contains missing values, duplicates, and inconsistencies. By implementing effective data preprocessing techniques, we aim to enhance data quality, making it suitable for accurate analysis and reliable machine learning models. This project is driven by the need to improve data integrity and ensure that the insights derived from data analytics are trustworthy and actionable.
 
-##Tools and Libraries
+## Tools and Libraries
 ---------------------
 Os: Directories  navigation.
 Pandas: Core library for data manipulation.
