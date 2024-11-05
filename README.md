@@ -12,11 +12,19 @@ IPython: Jupyter-specific imports for displaying links and HTML content.
 
 ## Installation
 ### Prerequisites
-**Python 3.6+**: Ensure you have Python installed. You can download it from [python.org](https://www.python.org/). - **Pandas**: For data manipulation. Install it using `pip install pandas`. - **NumPy**: For numerical computing. Install it using `pip install numpy`. - **Scikit-learn**: For machine learning tools. Install it using `pip install scikit-learn`. - **Jupyter Notebook**: For running and sharing code. Install it using `pip install notebook`.-**IPython**: For enhanced interactive Python. Install it using 'pip install ipython'.
+- **Python 3.6+**: Ensure you have Python installed. You can download it from [python.org](https://www.python.org/).
+- **Pandas**: For data manipulation. Install it using `pip install pandas`.
+- **NumPy**: For numerical computing. Install it using `pip install numpy`.
+- **Scikit-learn**: For machine learning tools. Install it using `pip install scikit-learn`.
+- **Jupyter Notebook**: For running and sharing code. Install it using `pip install notebook`.
+-**IPython**: For enhanced interactive Python. Install it using `pip install ipython`.
 
 ## License
-This project is licensed under the GPLv3 License - see the [https://github.com/mingrammer/diagrams/blob/master/LICENSE](LICENSE) file for details.
+This project is licensed under the GPLv3 License - see the [C:\Users\Admin\Downloads\LICENSE.txt](LICENSE) file for details.
 ## Authors
 - **Shreyas. A ** - *Developer* - [Shreyas.A](https://github.com/shr23-collab)
 
 For questions or support, contact [shreyas07023@gmail.com](mailto:shreyas07023@gmail.com).
+
+
+##                                                                                **Thank you!**
