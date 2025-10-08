@@ -1,5 +1,5 @@
 # =========================================================
-# 🔮 Smart Data Preprocessing Studio (CSV + Excel + Target-safe)
+#  Smart Data Preprocessing Studio (CSV + Excel + Target-safe)
 # ---------------------------------------------------------
 # Author: Shreyas 
 # Description: Interactive, industry-ready preprocessing UI
@@ -17,7 +17,7 @@ from sklearn.feature_selection import VarianceThreshold
 from ydata_profiling import ProfileReport
 
 # =========================================================
-# 🧠 Helper Functions
+#  Helper Functions
 # =========================================================
 
 def handle_missing(df, method, fill_value=None):
@@ -120,9 +120,9 @@ def preprocess_pipeline(file, target_col, missing_method, fill_const, encoding_t
         elif file.name.endswith((".xlsx", ".xls")):
             df = pd.read_excel(file.name)
         else:
-            return "❌ Unsupported file format. Upload CSV or Excel.", None, None
+            return " Unsupported file format. Upload CSV or Excel.", None, None
     except Exception as e:
-        return f"❌ Failed to read file: {e}", None, None
+        return f" Failed to read file: {e}", None, None
 
     original_shape = df.shape
     target = None
@@ -166,7 +166,7 @@ def preprocess_pipeline(file, target_col, missing_method, fill_const, encoding_t
         report_path = create_profile(df)
 
     summary = (
-        f"✅ Preprocessing Complete!\n"
+        f" Preprocessing Complete!\n"
         f"Original Shape: {original_shape}\n"
         f"New Shape: {df.shape}\n"
         f"Target Column: {target_col if target_col else 'None'}\n"
@@ -182,11 +182,11 @@ def preprocess_pipeline(file, target_col, missing_method, fill_const, encoding_t
 
 def app():
     with gr.Blocks(theme="soft", title="Smart Data Preprocessing Studio") as demo:
-        gr.Markdown("# 🧠 Smart Data Preprocessing Studio")
+        gr.Markdown("#  Smart Data Preprocessing Studio")
         gr.Markdown("### Upload, clean, encode, scale & profile your dataset — with target column safety!")
 
-        file_input = gr.File(label="📂 Upload CSV or Excel File", file_types=[".csv", ".xlsx", ".xls"])
-        target_col = gr.Textbox(label="🎯 Target Column (optional)", placeholder="e.g. target or label")
+        file_input = gr.File(label="Upload CSV or Excel File", file_types=[".csv", ".xlsx", ".xls"])
+        target_col = gr.Textbox(label=" Target Column (optional)", placeholder="e.g. target or label")
 
         with gr.Row():
             missing_method = gr.Dropdown(
@@ -219,9 +219,9 @@ def app():
         do_profile = gr.Checkbox(label="Generate Profiling Report (ydata_profiling)", value=False)
 
         btn = gr.Button(" Run Preprocessing")
-        summary = gr.Textbox(label="📋 Summary")
-        processed_file = gr.File(label="⬇️ Download Processed CSV")
-        report_file = gr.File(label="📊 Profiling Report (if generated)")
+        summary = gr.Textbox(label=" Summary")
+        processed_file = gr.File(label=" Download Processed CSV")
+        report_file = gr.File(label=" Profiling Report (if generated)")
 
         btn.click(
             fn=preprocess_pipeline,
