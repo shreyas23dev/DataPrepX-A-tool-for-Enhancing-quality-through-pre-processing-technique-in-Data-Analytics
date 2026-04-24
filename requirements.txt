@@ -1,0 +1,8 @@
+gradio
+pandas
+numpy
+scikit-learn
+ydata-profiling
+openpyxl
+ipython
+setuptools
