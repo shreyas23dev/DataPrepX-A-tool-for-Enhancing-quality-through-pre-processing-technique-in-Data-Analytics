@@ -1,10 +1,15 @@
 {
-    "target_column": "Country",
+    "source_file": "/home/trinath/Desktop/temp/DataPrepX-A-tool-for-Enhancing-quality-through-pre-processing-technique-in-Data-Analytics/test_dataset.csv",
+    "target_column": "",
     "missing_method": "mean",
     "fill_value": "",
     "encoding": "Label",
-    "scaler": "MinMax",
-    "outlier_method": "None",
+    "scaler": "Standard",
+    "outlier_method": "IQR",
     "variance_threshold": 0.0,
-    "profile_report": false
+    "output_formats": [
+        "csv",
+        "json"
+    ],
+    "output_directory": "/home/trinath/Desktop/temp/DataPrepX-A-tool-for-Enhancing-quality-through-pre-processing-technique-in-Data-Analytics"
 }

@@ -6,3 +6,5 @@ ydata-profiling
 openpyxl
 ipython
 setuptools
+rich
+questionary
