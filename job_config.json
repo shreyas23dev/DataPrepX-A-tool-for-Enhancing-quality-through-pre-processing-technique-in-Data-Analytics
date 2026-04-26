@@ -9,7 +9,8 @@
     "variance_threshold": 0.0,
     "output_formats": [
         "csv",
-        "json"
+        "json",
+        "xlsx"
     ],
     "output_directory": "/home/trinath/Desktop/temp/DataPrepX-A-tool-for-Enhancing-quality-through-pre-processing-technique-in-Data-Analytics"
 }

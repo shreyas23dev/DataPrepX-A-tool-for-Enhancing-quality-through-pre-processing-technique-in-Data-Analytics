@@ -168,6 +168,10 @@ def preprocess_pipeline(file, target_col, missing_method, fill_const, encoding_t
     json_name = "processed_dataset.json"
     df.to_json(json_name, orient="records", indent=4)
 
+    # --- Save XLSX Output ---
+    xlsx_name = "processed_dataset.xlsx"
+    df.to_excel(xlsx_name, index=False, engine="openpyxl")
+
     with open("job_config.json", "w") as f:
         json.dump(config, f, indent=4)
 
@@ -181,10 +185,10 @@ def preprocess_pipeline(file, target_col, missing_method, fill_const, encoding_t
         f"New Shape: {df.shape}\n"
         f"Target Column: {target_col if target_col else 'None'}\n"
         f"Remaining Nulls: {df.isnull().sum().sum()}\n"
-        f"Output Formats: CSV, JSON\n"
+        f"Output Formats: CSV, JSON, XLSX\n"
     )
 
-    return summary, processed_name, json_name, report_path
+    return summary, processed_name, json_name, xlsx_name, report_path
 
 
 # =========================================================
@@ -234,7 +238,8 @@ def app():
 
         with gr.Row():
             processed_file = gr.File(label=" Download Processed CSV")
-            json_file = gr.File(label=" Download Processed JSON")
+            json_file      = gr.File(label=" Download Processed JSON")
+            xlsx_file      = gr.File(label=" Download Processed XLSX")
 
         report_file = gr.File(label=" Profiling Report (if generated)")
 
@@ -242,7 +247,7 @@ def app():
             fn=preprocess_pipeline,
             inputs=[file_input, target_col, missing_method, fill_const, encoding_type,
                     scaler_type, outlier_method, var_thresh, do_profile],
-            outputs=[summary, processed_file, json_file, report_file]
+            outputs=[summary, processed_file, json_file, xlsx_file, report_file]
         )
 
     return demo

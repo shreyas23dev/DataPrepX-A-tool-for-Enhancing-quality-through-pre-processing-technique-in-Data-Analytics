@@ -150,7 +150,7 @@ def print_banner():
     console.print(Panel.fit(
         "[bold cyan]DataPrepX[/bold cyan]  [dim]—[/dim]  "
         "[bold white]Smart Data Preprocessing Studio[/bold white]\n"
-        "[dim]Interactive Terminal  ·  CSV + JSON output[/dim]",
+        "[dim]Interactive Terminal  ·  CSV · JSON · XLSX output[/dim]",
         border_style="cyan",
         padding=(1, 4),
     ))
@@ -305,6 +305,7 @@ def ask_config(df: pd.DataFrame, file_path: str) -> dict:
         choices=[
             questionary.Choice("CSV   — processed_<filename>.csv",  "csv",  checked=True),
             questionary.Choice("JSON  — processed_<filename>.json", "json", checked=True),
+            questionary.Choice("XLSX  — processed_<filename>.xlsx", "xlsx", checked=True),
         ],
         style=Q_STYLE,
     ).ask()
@@ -406,6 +407,11 @@ def save_outputs(df: pd.DataFrame, file_path: str, cfg: dict) -> dict:
         json_path = os.path.join(out_dir, f"processed_{basename}.json")
         df.to_json(json_path, orient="records", indent=4)
         saved["json"] = json_path
+
+    if "xlsx" in cfg["output_formats"]:
+        xlsx_path = os.path.join(out_dir, f"processed_{basename}.xlsx")
+        df.to_excel(xlsx_path, index=False, engine="openpyxl")
+        saved["xlsx"] = xlsx_path
 
     # Always save job config
     config_record = {
