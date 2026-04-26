@@ -1,4 +1,5 @@
 import os
+import json
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import LabelEncoder
@@ -126,8 +127,12 @@ display(df.head())
 # Export the processed DataFrame to a CSV file
 processed_fname = "processed_" + fname
 df.to_csv(processed_fname, index=False)
-
 print("Processed DataFrame exported to", processed_fname)
+
+# Export the processed DataFrame to a JSON file
+json_fname = "processed_" + fname.replace(".csv", ".json")
+df.to_json(json_fname, orient="records", indent=4)
+print("Processed DataFrame exported to", json_fname)
 
 # Create a file link to download the processed CSV file
 file_link = HTML(f'<a href="data:application/octet-stream;base64,{processed_fname.encode().decode()}" download="{processed_fname}">Download: {processed_fname}</a>')
