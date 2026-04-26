@@ -49,6 +49,10 @@ def encode_features(df, encoding_type):
             df[c] = le.fit_transform(df[c].astype(str))
     elif encoding_type == "One-Hot":
         df = pd.get_dummies(df, columns=cat_cols, drop_first=True)
+        # Cast bool columns (produced by get_dummies) to int8 so they are
+        # treated as numeric in all downstream steps.
+        bool_cols = df.select_dtypes(include=[bool]).columns
+        df[bool_cols] = df[bool_cols].astype(np.int8)
     elif encoding_type == "Ordinal":
         oe = OrdinalEncoder()
         df[cat_cols] = oe.fit_transform(df[cat_cols].astype(str))
@@ -78,12 +82,12 @@ def handle_outliers(df, method):
         Q3 = num_cols.quantile(0.75)
         IQR = Q3 - Q1
         mask = ~((num_cols < (Q1 - 1.5 * IQR)) | (num_cols > (Q3 + 1.5 * IQR))).any(axis=1)
-        return df[mask]
+        return df[mask].reset_index(drop=True)
     elif method == "EllipticEnvelope":
         ee = EllipticEnvelope(contamination=0.05)
         try:
             mask = ee.fit_predict(num_cols) == 1
-            return df[mask]
+            return df[mask].reset_index(drop=True)
         except:
             return df
     return df
@@ -91,10 +95,12 @@ def handle_outliers(df, method):
 
 def feature_selection(df, threshold):
     sel = VarianceThreshold(threshold=threshold)
+    df = df.reset_index(drop=True)          # ensure contiguous index before concat
     num_cols = df.select_dtypes(include=[np.number])
     if not num_cols.empty:
         reduced = sel.fit_transform(num_cols)
-        reduced_df = pd.DataFrame(reduced, columns=num_cols.columns[sel.get_support()])
+        reduced_df = pd.DataFrame(reduced, columns=num_cols.columns[sel.get_support()],
+                                  index=df.index)
         df = df.drop(columns=num_cols.columns)
         df = pd.concat([df, reduced_df], axis=1)
     return df

@@ -1,0 +1,10 @@
+{
+    "target_column": "Country",
+    "missing_method": "mean",
+    "fill_value": "",
+    "encoding": "Label",
+    "scaler": "MinMax",
+    "outlier_method": "None",
+    "variance_threshold": 0.0,
+    "profile_report": false
+}
