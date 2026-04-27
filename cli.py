@@ -303,7 +303,7 @@ def _list_ollama_models() -> list[str]:
     return []
 
 
-def build_data_snapshot(df: pd.DataFrame, max_rows: int = 5) -> str:
+def build_data_snapshot(df: pd.DataFrame, max_rows: int = 3) -> str:
     """Compact text summary of df — injected as the LLM system context."""
     lines = [
         f"DataFrame shape: {df.shape[0]:,} rows × {df.shape[1]} columns\n",
@@ -312,13 +312,15 @@ def build_data_snapshot(df: pd.DataFrame, max_rows: int = 5) -> str:
     for col in df.columns:
         sample = df[col].dropna().iloc[0] if df[col].dropna().shape[0] else "—"
         lines.append(
-            f"  {col!r:<30} {str(df[col].dtype):<12} "
-            f"nulls={df[col].isnull().sum():<6} sample={str(sample)[:40]!r}"
+            f"  {col!r:<28} {str(df[col].dtype):<10} "
+            f"nulls={df[col].isnull().sum():<5} sample={str(sample)[:30]!r}"
         )
 
-    lines.append(f"\nFirst {min(max_rows, len(df))} rows (truncated to 80 chars per cell):")
+    # Cap the inline preview to keep the system prompt concise
+    n = min(max_rows, len(df))
+    lines.append(f"\nFirst {n} rows (truncated to 40 chars per cell):")
     try:
-        preview = df.head(max_rows).to_string(max_colwidth=80)
+        preview = df.head(n).to_string(max_colwidth=40)
         lines.append(preview)
     except Exception:
         lines.append("(could not render preview)")
@@ -448,25 +450,47 @@ def ollama_chat_loop(df: pd.DataFrame, stage_label: str = "Data") -> None:
 
         messages.append({"role": "user", "content": user_input.strip()})
 
-        def _call_ollama(msgs: list[dict]) -> str:
+        def _stream_ollama(msgs: list[dict], print_live: bool = False) -> str:
+            """Call Ollama with stream=True. Each chunk resets the per-read timeout
+            so we never block waiting for a full response. When print_live=True
+            tokens are written to stdout as they arrive."""
+            full = ""
             try:
                 r = requests.post(
                     f"{OLLAMA_BASE_URL}/api/chat",
-                    json={"model": model, "messages": msgs, "stream": False},
-                    timeout=120,
+                    json={"model": model, "messages": msgs, "stream": True},
+                    # (connect_timeout, per-chunk read timeout)
+                    timeout=(15, 300),
+                    stream=True,
                 )
                 r.raise_for_status()
-                return r.json()["message"]["content"]
+                for raw_line in r.iter_lines():
+                    if not raw_line:
+                        continue
+                    try:
+                        chunk = json.loads(raw_line)
+                    except json.JSONDecodeError:
+                        continue
+                    token = chunk.get("message", {}).get("content", "")
+                    full += token
+                    if print_live and token:
+                        # Write token directly — rich markup not parsed here
+                        # so angle-bracket model output is safe
+                        sys.stdout.write(token)
+                        sys.stdout.flush()
+                    if chunk.get("done"):
+                        break
             except requests.exceptions.ConnectionError:
-                return "[ERROR] Cannot connect to Ollama. Is `ollama serve` running?"
+                full = "[ERROR] Cannot connect to Ollama. Is `ollama serve` running?"
             except Exception as exc:
-                return f"[ERROR] {exc}"
+                full = f"[ERROR] {type(exc).__name__}: {exc}"
+            return full
 
-        # ── First model call ──────────────────────────────────
+        # ── First model call (silent stream — tool-call detection) ────────
         with console.status(f"[cyan]{model} is thinking…[/cyan]"):
-            reply = _call_ollama(messages)
+            reply = _stream_ollama(messages, print_live=False)
 
-        # ── Tool-call handling ────────────────────────────────
+        # ── Tool-call handling ────────────────────────────────────────────
         tool_call = _extract_tool_call(reply)
         if tool_call:
             expr = tool_call.get("parameters", {}).get("expression", "")
@@ -476,28 +500,26 @@ def ollama_chat_loop(df: pd.DataFrame, stage_label: str = "Data") -> None:
             with console.status("[cyan]Running query…[/cyan]"):
                 tool_result = query_data_tool(df, expr)
 
-            # Feed tool result back
+            # Feed tool result back then stream the final answer live
             messages.append({"role": "assistant", "content": reply})
             messages.append({
                 "role": "user",
                 "content": f"[Tool result for query_data({expr!r})]:\n{tool_result}",
             })
+            console.print()
+            console.print(f"  [bold cyan]{model}:[/bold cyan]")
+            reply = _stream_ollama(messages, print_live=True)
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        else:
+            # ── Stream the answer live to the terminal ────────────────────
+            console.print()
+            console.print(f"  [bold cyan]{model}:[/bold cyan]")
+            reply = _stream_ollama(messages, print_live=True)
+            sys.stdout.write("\n")
+            sys.stdout.flush()
 
-            with console.status(f"[cyan]{model} is composing answer…[/cyan]"):
-                reply = _call_ollama(messages)
-
-        # ── Display response ──────────────────────────────────
         console.print()
-        console.print(
-            Panel(
-                reply,
-                title=f"[bold cyan]{model}[/bold cyan]",
-                border_style="cyan",
-                padding=(0, 2),
-            )
-        )
-        console.print()
-
         messages.append({"role": "assistant", "content": reply})
 
 
