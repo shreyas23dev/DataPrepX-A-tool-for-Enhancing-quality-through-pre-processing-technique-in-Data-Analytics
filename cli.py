@@ -348,6 +348,66 @@ def query_data_tool(df: pd.DataFrame, expression: str) -> str:
         return f"[ERROR] {type(exc).__name__}: {exc}"
 
 
+def edit_cell_tool(
+    df: pd.DataFrame,
+    column: str,
+    row_index: int | str,
+    new_value: str,
+) -> tuple[str, object, object]:
+    """Write *new_value* into df.at[row_index, column].
+
+    Returns (message, old_value, cast_new_value).  The caller is responsible
+    for recording the audit entry; this function only mutates `df`.
+    """
+    # ── Validate column ───────────────────────────────────────
+    if column not in df.columns:
+        close = [c for c in df.columns if column.lower() in c.lower()]
+        hint  = f"  Did you mean: {close[:3]}?" if close else ""
+        return (
+            f"[ERROR] Column {column!r} not found.{hint}",
+            None,
+            None,
+        )
+
+    # ── Validate row index ────────────────────────────────────
+    try:
+        row_idx = int(row_index)
+    except (ValueError, TypeError):
+        return (f"[ERROR] row_index must be an integer, got {row_index!r}.", None, None)
+
+    if not (0 <= row_idx < len(df)):
+        return (
+            f"[ERROR] row_index {row_idx} is out of range (0 – {len(df) - 1}).",
+            None,
+            None,
+        )
+
+    old_val = df.at[row_idx, column]
+
+    # ── Dtype-aware cast ──────────────────────────────────────
+    try:
+        if new_value.strip().lower() in ("nan", "null", "none", ""):
+            cast_val = np.nan
+        elif pd.api.types.is_integer_dtype(df[column]):
+            cast_val = int(float(new_value))   # int(float()) handles "3.0"
+        elif pd.api.types.is_float_dtype(df[column]):
+            cast_val = float(new_value)
+        elif pd.api.types.is_bool_dtype(df[column]):
+            cast_val = new_value.strip().lower() in ("true", "1", "yes")
+        else:
+            cast_val = new_value                # keep as string
+    except (ValueError, TypeError) as exc:
+        return (f"[ERROR] Cannot cast {new_value!r} to {df[column].dtype}: {exc}", None, None)
+
+    df.at[row_idx, column] = cast_val
+    msg = (
+        f"✓ [{column}][row {row_idx}]  "
+        f"{old_val!r}  →  {cast_val!r}  "
+        f"(dtype: {df[column].dtype})"
+    )
+    return (msg, old_val, cast_val)
+
+
 # ─── Tool-call detector (JSON code block in model reply) ─────────────────────
 _TOOL_RE = re.compile(
     r"```(?:json)?\s*(\{.*?\})\s*```",
@@ -355,14 +415,20 @@ _TOOL_RE = re.compile(
 )
 
 
+_KNOWN_TOOLS = {"query_data", "edit_cell"}
+
+
 def _extract_tool_call(text: str) -> dict | None:
-    """Look for a JSON tool-call block in the model's reply."""
+    """Look for a JSON tool-call block in the model's reply.
+
+    Accepts any tool whose name is in _KNOWN_TOOLS.
+    """
     match = _TOOL_RE.search(text)
     if not match:
         return None
     try:
         obj = json.loads(match.group(1))
-        if isinstance(obj, dict) and obj.get("name") == "query_data":
+        if isinstance(obj, dict) and obj.get("name") in _KNOWN_TOOLS:
             return obj
     except json.JSONDecodeError:
         pass
@@ -403,16 +469,34 @@ def ollama_chat_loop(df: pd.DataFrame, stage_label: str = "Data") -> None:
         return
 
     # ── System prompt ─────────────────────────────────────────
-    snapshot  = build_data_snapshot(df)
-    tool_spec = json.dumps({
+    snapshot = build_data_snapshot(df)
+
+    query_tool_spec = json.dumps({
         "name": "query_data",
         "description": (
             "Run a pandas expression on the live DataFrame `df` and return "
-            "the result as a string. Use this to answer questions about the data. "
-            "Always reference the DataFrame as `df`."
+            "the result as a string. Use this to inspect or answer questions "
+            "about the data. Always reference the DataFrame as `df`."
         ),
         "parameters": {
             "expression": "A valid pandas expression string, e.g. \"df['Age'].describe()\""
+        },
+    }, indent=2)
+
+    edit_tool_spec = json.dumps({
+        "name": "edit_cell",
+        "description": (
+            "Write a new value into a single cell of the live DataFrame. "
+            "Use this when the user explicitly asks to change, fix, replace, "
+            "or set a specific cell value. The change is permanent for this session."
+        ),
+        "parameters": {
+            "column":    "Exact column name (string) — must match a column in the dataset.",
+            "row_index": "Zero-based integer row index of the cell to edit.",
+            "new_value": (
+                "New value as a string. For NaN/null write 'nan'. "
+                "The tool will cast it to the column's dtype automatically."
+            ),
         },
     }, indent=2)
 
@@ -420,17 +504,68 @@ def ollama_chat_loop(df: pd.DataFrame, stage_label: str = "Data") -> None:
         f"You are DataPrepX Assistant, an expert data analyst helping the user understand "
         f"and preprocess their dataset ({stage_label} stage).\n\n"
         f"=== DATASET SNAPSHOT ===\n{snapshot}\n\n"
-        f"=== TOOL AVAILABLE ===\n"
-        f"You have access to one tool:\n{tool_spec}\n\n"
-        f"To call the tool, respond with ONLY a JSON code block like this:\n"
-        f"```json\n{{\"name\": \"query_data\", \"parameters\": {{\"expression\": \"<expr>\"}}}}\n```\n"
-        f"After receiving the tool result, incorporate it into a clear, concise answer. "
-        f"Do not call the tool more than once per user message. "
-        f"If the user's question can be answered from the snapshot alone, answer directly."
+        f"=== TOOLS AVAILABLE ===\n"
+        f"You have access to TWO tools:\n\n"
+        f"1. query_data — inspect the data:\n{query_tool_spec}\n\n"
+        f"2. edit_cell  — change a cell value:\n{edit_tool_spec}\n\n"
+        f"To call a tool, respond with ONLY a JSON code block (no other text):\n"
+        f"```json\n"
+        f'{{"name": "query_data", "parameters": {{"expression": "<pandas_expr>"}}}}\n'
+        f"```\n"
+        f"or\n"
+        f"```json\n"
+        f'{{"name": "edit_cell", "parameters": {{"column": "<col>", "row_index": <int>, "new_value": "<val>"}}}}\n'
+        f"```\n\n"
+        f"Rules:\n"
+        f"- Only ONE tool call per reply.\n"
+        f"- After receiving the tool result, reply in plain English confirming what happened.\n"
+        f"- Use query_data FIRST to verify the current value before editing if unsure.\n"
+        f"- If the user's question needs no tool, answer directly from the snapshot.\n"
+        f"- NEVER invent column names or row indices — use only what exists in the snapshot."
     )
 
-    messages: list[dict] = [{"role": "system", "content": system_prompt}]
-    console.print(f"  [bold green]●[/bold green]  Model: [cyan]{model}[/cyan]\n")
+    messages:   list[dict] = [{"role": "system", "content": system_prompt}]
+    _llm_edits: list[dict] = []   # audit log of every cell edit made by the LLM
+
+    console.print(f"  [bold green]●[/bold green]  Model: [cyan]{model}[/cyan]")
+    console.print(
+        "  [dim]Tools:[/dim] [yellow]query_data[/yellow]  [dim]·[/dim]  "
+        "[yellow]edit_cell[/yellow]\n"
+    )
+
+    # ── Streaming helper (defined once, captures `model` from closure) ────
+    def _stream_ollama(msgs: list[dict], print_live: bool = False) -> str:
+        """Call Ollama with stream=True.  Each chunk resets the per-read timeout
+        so we never block waiting for a full response.  When print_live=True
+        tokens are written to stdout as they arrive."""
+        full = ""
+        try:
+            r = requests.post(
+                f"{OLLAMA_BASE_URL}/api/chat",
+                json={"model": model, "messages": msgs, "stream": True},
+                timeout=(15, 300),   # (connect_timeout, per-chunk read timeout)
+                stream=True,
+            )
+            r.raise_for_status()
+            for raw_line in r.iter_lines():
+                if not raw_line:
+                    continue
+                try:
+                    chunk = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                token = chunk.get("message", {}).get("content", "")
+                full += token
+                if print_live and token:
+                    sys.stdout.write(token)
+                    sys.stdout.flush()
+                if chunk.get("done"):
+                    break
+        except requests.exceptions.ConnectionError:
+            full = "[ERROR] Cannot connect to Ollama. Is `ollama serve` running?"
+        except Exception as exc:
+            full = f"[ERROR] {type(exc).__name__}: {exc}"
+        return full
 
     # ── Chat loop ─────────────────────────────────────────────
     while True:
@@ -450,49 +585,14 @@ def ollama_chat_loop(df: pd.DataFrame, stage_label: str = "Data") -> None:
 
         messages.append({"role": "user", "content": user_input.strip()})
 
-        def _stream_ollama(msgs: list[dict], print_live: bool = False) -> str:
-            """Call Ollama with stream=True. Each chunk resets the per-read timeout
-            so we never block waiting for a full response. When print_live=True
-            tokens are written to stdout as they arrive."""
-            full = ""
-            try:
-                r = requests.post(
-                    f"{OLLAMA_BASE_URL}/api/chat",
-                    json={"model": model, "messages": msgs, "stream": True},
-                    # (connect_timeout, per-chunk read timeout)
-                    timeout=(15, 300),
-                    stream=True,
-                )
-                r.raise_for_status()
-                for raw_line in r.iter_lines():
-                    if not raw_line:
-                        continue
-                    try:
-                        chunk = json.loads(raw_line)
-                    except json.JSONDecodeError:
-                        continue
-                    token = chunk.get("message", {}).get("content", "")
-                    full += token
-                    if print_live and token:
-                        # Write token directly — rich markup not parsed here
-                        # so angle-bracket model output is safe
-                        sys.stdout.write(token)
-                        sys.stdout.flush()
-                    if chunk.get("done"):
-                        break
-            except requests.exceptions.ConnectionError:
-                full = "[ERROR] Cannot connect to Ollama. Is `ollama serve` running?"
-            except Exception as exc:
-                full = f"[ERROR] {type(exc).__name__}: {exc}"
-            return full
-
-        # ── First model call (silent stream — tool-call detection) ────────
+        # ── First model call (silent — tool-call detection) ───────────────
         with console.status(f"[cyan]{model} is thinking…[/cyan]"):
             reply = _stream_ollama(messages, print_live=False)
 
         # ── Tool-call handling ────────────────────────────────────────────
         tool_call = _extract_tool_call(reply)
-        if tool_call:
+
+        if tool_call and tool_call["name"] == "query_data":
             expr = tool_call.get("parameters", {}).get("expression", "")
             console.print(
                 f"  [dim]⚙ tool:[/dim] [yellow]query_data[/yellow]([cyan]{expr[:80]}[/cyan])"
@@ -500,7 +600,6 @@ def ollama_chat_loop(df: pd.DataFrame, stage_label: str = "Data") -> None:
             with console.status("[cyan]Running query…[/cyan]"):
                 tool_result = query_data_tool(df, expr)
 
-            # Feed tool result back then stream the final answer live
             messages.append({"role": "assistant", "content": reply})
             messages.append({
                 "role": "user",
@@ -511,8 +610,46 @@ def ollama_chat_loop(df: pd.DataFrame, stage_label: str = "Data") -> None:
             reply = _stream_ollama(messages, print_live=True)
             sys.stdout.write("\n")
             sys.stdout.flush()
+
+        elif tool_call and tool_call["name"] == "edit_cell":
+            params    = tool_call.get("parameters", {})
+            col       = params.get("column", "")
+            row_idx   = params.get("row_index", "")
+            new_val   = str(params.get("new_value", ""))
+
+            console.print(
+                f"  [dim]⚙ tool:[/dim] [yellow]edit_cell[/yellow]("
+                f"[cyan]{col}[/cyan], row=[cyan]{row_idx}[/cyan], "
+                f"value=[cyan]{new_val[:40]!r}[/cyan])"
+            )
+            with console.status("[cyan]Applying edit…[/cyan]"):
+                tool_result, old_v, new_v = edit_cell_tool(df, col, row_idx, new_val)
+
+            # Record in audit log (only successful edits)
+            if old_v is not None:
+                _llm_edits.append({
+                    "column":    col,
+                    "row_index": int(row_idx),
+                    "old_value": old_v,
+                    "new_value": new_v,
+                })
+
+            messages.append({"role": "assistant", "content": reply})
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"[Tool result for edit_cell(column={col!r}, "
+                    f"row_index={row_idx}, new_value={new_val!r})]:\n{tool_result}"
+                ),
+            })
+            console.print()
+            console.print(f"  [bold cyan]{model}:[/bold cyan]")
+            reply = _stream_ollama(messages, print_live=True)
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
         else:
-            # ── Stream the answer live to the terminal ────────────────────
+            # ── No tool — stream the answer live ──────────────────────────
             console.print()
             console.print(f"  [bold cyan]{model}:[/bold cyan]")
             reply = _stream_ollama(messages, print_live=True)
@@ -521,6 +658,29 @@ def ollama_chat_loop(df: pd.DataFrame, stage_label: str = "Data") -> None:
 
         console.print()
         messages.append({"role": "assistant", "content": reply})
+
+    # ── Edit audit log ────────────────────────────────────────────────────
+    if _llm_edits:
+        console.print(Rule("[bold yellow]LLM Edit Log[/bold yellow]"))
+        edit_table = Table(
+            title=f"{len(_llm_edits)} cell(s) changed by the LLM",
+            box=box.ROUNDED,
+            border_style="yellow",
+            header_style="bold yellow",
+        )
+        edit_table.add_column("Column",    style="cyan",         no_wrap=True)
+        edit_table.add_column("Row",       style="dim",          justify="right", width=7)
+        edit_table.add_column("Old Value", style="bold red",     no_wrap=True)
+        edit_table.add_column("New Value", style="bold green",   no_wrap=True)
+        for entry in _llm_edits:
+            edit_table.add_row(
+                entry["column"],
+                str(entry["row_index"]),
+                str(entry["old_value"])[:40],
+                str(entry["new_value"])[:40],
+            )
+        console.print(edit_table)
+        console.print()
 
 
 # ─────────────────────────────────────────────────────────────
