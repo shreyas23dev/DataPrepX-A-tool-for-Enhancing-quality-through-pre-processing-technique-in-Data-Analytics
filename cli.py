@@ -224,12 +224,17 @@ def select_and_edit_cells(df: pd.DataFrame) -> pd.DataFrame:
         ctx_table.add_column("Row",   style="dim",        width=8)
         ctx_table.add_column("Value", style="bold white", no_wrap=True)
         for r, (ridx, row) in enumerate(ctx.iterrows()):
-            val_str = str(row[col])
-            style   = "bold yellow" if ridx == row_idx else ""
-            ctx_table.add_row(
-                f"[{style}]{'→ ' if ridx == row_idx else '  '}{ridx}[/{style}]",
-                f"[{style}]{val_str[:80]}[/{style}]",
-            )
+            val_str  = str(row[col])
+            is_sel   = ridx == row_idx
+            row_text = f"{'→ ' if is_sel else '  '}{ridx}"
+            val_text = val_str[:80]
+            if is_sel:
+                ctx_table.add_row(
+                    f"[bold yellow]{row_text}[/bold yellow]",
+                    f"[bold yellow]{val_text}[/bold yellow]",
+                )
+            else:
+                ctx_table.add_row(row_text, val_text)
         console.print(ctx_table)
         console.print()
 
