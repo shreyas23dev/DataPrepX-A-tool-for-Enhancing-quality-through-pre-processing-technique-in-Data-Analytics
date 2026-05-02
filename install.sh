@@ -82,6 +82,22 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+if [[ ! -f "requirements.txt" ]] || [[ ! -f "cli.py" ]]; then
+    step "Project files not found. Cloning repository..."
+    REPO_URL="https://github.com/shreyas23dev/DataPrepX-A-tool-for-Enhancing-quality-through-pre-processing-technique-in-Data-Analytics.git"
+    CLONE_DIR="DataPrepX"
+    
+    if ! command -v git &>/dev/null; then
+        fail "git is not installed. Please install git or download the repository manually."
+    fi
+    
+    git clone "$REPO_URL" "$CLONE_DIR" || fail "Failed to clone repository."
+    cd "$CLONE_DIR"
+    SCRIPT_DIR="$(pwd)"
+    CLONED_INTO="$CLONE_DIR"
+    ok "Repository cloned into $SCRIPT_DIR"
+fi
+
 # =============================================================================
 print_banner
 
@@ -239,6 +255,10 @@ echo -e "${GREEN}${BOLD}  ✔  DataPrepX installation complete!${RESET}"
 echo -e "${CYAN}  ════════════════════════════════════════════════════════════${RESET}"
 echo ""
 echo -e "  ${BOLD}Run DataPrepX:${RESET}"
+
+if [[ -n "${CLONED_INTO:-}" ]]; then
+    echo -e "    ${YELLOW}cd ${CLONED_INTO}${RESET}"
+fi
 
 if $USE_VENV; then
     echo -e "    ${DIM}Option 1 (launcher, no activation needed):${RESET}"
