@@ -157,11 +157,11 @@ ok "pip, setuptools, wheel are up-to-date"
 # ── 5. Install project dependencies ───────────────────────────────────────────
 step "Installing DataPrepX dependencies (requirements.txt)"
 
-if [[ ! -f "$SCRIPT_DIR/requirements.txt" ]]; then
+if [[ ! -f "requirements.txt" ]]; then
     fail "requirements.txt not found in $SCRIPT_DIR"
 fi
 
-"$PYTHON_BIN" -m pip install -r "$SCRIPT_DIR/requirements.txt"
+"$PYTHON_BIN" -m pip install -r requirements.txt
 ok "All dependencies installed successfully"
 
 # ── 6. Optional dev dependencies ──────────────────────────────────────────────
