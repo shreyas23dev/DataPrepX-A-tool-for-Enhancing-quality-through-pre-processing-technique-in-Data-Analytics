@@ -125,11 +125,29 @@ fi
 # ── 2. pip check ───────────────────────────────────────────────────────────────
 step "Checking pip"
 
-if ! "$PYTHON_BIN" -m pip --version &>/dev/null; then
+PIP_CMD=""
+if "$PYTHON_BIN" -m pip --version &>/dev/null; then
+    PIP_CMD="$PYTHON_BIN -m pip"
+elif command -v pip3 &>/dev/null; then
+    PIP_CMD="pip3"
+elif command -v pip &>/dev/null; then
+    PIP_CMD="pip"
+else
     warn "pip is not available — attempting bootstrap via ensurepip"
-    "$PYTHON_BIN" -m ensurepip --upgrade || fail "Could not bootstrap pip. Install pip manually and retry."
+    if ! "$PYTHON_BIN" -m ensurepip --upgrade &>/dev/null; then
+        if $USE_VENV; then
+            warn "Global pip not found, but will attempt to use virtual environment pip."
+        else
+            fail "Could not bootstrap pip. Please install pip manually (e.g., sudo apt install python3-pip) and retry."
+        fi
+    else
+        PIP_CMD="$PYTHON_BIN -m pip"
+    fi
 fi
-ok "pip is available  →  $("$PYTHON_BIN" -m pip --version)"
+
+if [[ -n "$PIP_CMD" ]]; then
+    ok "pip is available  →  $($PIP_CMD --version)"
+fi
 
 # ── 3. Virtual environment ─────────────────────────────────────────────────────
 if $USE_VENV; then
@@ -146,12 +164,13 @@ if $USE_VENV; then
     # shellcheck disable=SC1091
     source "$VENV_DIR/bin/activate"
     PYTHON_BIN="python"
+    PIP_CMD="$PYTHON_BIN -m pip"
     ok "Activated: $(python --version)  ($VENV_DIR)"
 fi
 
 # ── 4. Upgrade pip + setuptools inside the env ────────────────────────────────
 step "Upgrading pip & setuptools"
-"$PYTHON_BIN" -m pip install --upgrade pip setuptools wheel -q
+$PIP_CMD install --upgrade pip setuptools wheel -q
 ok "pip, setuptools, wheel are up-to-date"
 
 # ── 5. Install project dependencies ───────────────────────────────────────────
@@ -161,13 +180,13 @@ if [[ ! -f "$SCRIPT_DIR/requirements.txt" ]]; then
     fail "requirements.txt not found in $SCRIPT_DIR"
 fi
 
-"$PYTHON_BIN" -m pip install -r "$SCRIPT_DIR/requirements.txt"
+$PIP_CMD install -r "$SCRIPT_DIR/requirements.txt"
 ok "All dependencies installed successfully"
 
 # ── 6. Optional dev dependencies ──────────────────────────────────────────────
 if $INSTALL_DEV; then
     step "Installing optional development dependencies"
-    "$PYTHON_BIN" -m pip install pytest pytest-cov black isort mypy -q
+    $PIP_CMD install pytest pytest-cov black isort mypy -q
     ok "Development tools installed (pytest, black, isort, mypy)"
 fi
 
