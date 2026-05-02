@@ -105,7 +105,7 @@ print_banner
 step "Checking Python installation"
 
 PYTHON_BIN=""
-for candidate in python3 python; do
+for candidate in python python3; do
     if command -v "$candidate" &>/dev/null; then
         PY_VER=$("$candidate" -c 'import sys; print(sys.version_info[:2])')
         if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)' 2>/dev/null; then
@@ -128,9 +128,9 @@ step "Checking pip"
 PIP_CMD=""
 if "$PYTHON_BIN" -m pip --version &>/dev/null; then
     PIP_CMD="$PYTHON_BIN -m pip"
-elif command -v pip3 &>/dev/null; then
+elif command -v pip3 &>/dev/null && pip3 --version &>/dev/null; then
     PIP_CMD="pip3"
-elif command -v pip &>/dev/null; then
+elif command -v pip &>/dev/null && pip --version &>/dev/null; then
     PIP_CMD="pip"
 else
     warn "pip is not available — attempting bootstrap via ensurepip"
@@ -146,7 +146,7 @@ else
 fi
 
 if [[ -n "$PIP_CMD" ]]; then
-    ok "pip is available  →  $($PIP_CMD --version)"
+    ok "pip is available  →  $($PIP_CMD --version 2>/dev/null || echo 'yes')"
 fi
 
 # ── 3. Virtual environment ─────────────────────────────────────────────────────
