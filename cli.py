@@ -37,6 +37,7 @@ from sklearn.preprocessing import (
 )
 from sklearn.covariance import EllipticEnvelope
 from sklearn.feature_selection import VarianceThreshold
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 
 # ─────────────────────────────────────────────────────────────
 #  Console & Style setup
@@ -73,6 +74,108 @@ def handle_missing(df, method, fill_value=None):
         return df.bfill()
     elif method == "drop":
         return df.dropna()
+    return df
+
+
+def handle_missing_rf(df: pd.DataFrame, n_estimators: int = 100, random_state: int = 42) -> pd.DataFrame:
+    """Fill missing values using Random Forest imputation.
+
+    For each column that contains NaN values:
+      - Numeric columns  → RandomForestRegressor predicts the missing values.
+      - Object / category columns → RandomForestClassifier predicts the missing values.
+
+    The remaining columns are used as features. Any missing values in those
+    *feature* columns are temporarily filled with their median (numeric) or
+    most-frequent value (categorical) so the RF can be trained without further
+    cascading NaN issues.
+
+    Falls back to median / mode imputation for a column if there are fewer than
+    10 complete (non-NaN) rows available to train the model.
+    """
+    df = df.copy()
+    cols_with_nulls = [c for c in df.columns if df[c].isnull().any()]
+
+    if not cols_with_nulls:
+        return df
+
+    # ── Build a "working" copy where every cell is filled (used as feature matrix)
+    df_filled = df.copy()
+    for c in df.columns:
+        if df_filled[c].isnull().any():
+            if pd.api.types.is_numeric_dtype(df_filled[c]):
+                df_filled[c] = df_filled[c].fillna(df_filled[c].median())
+            else:
+                mode_val = df_filled[c].mode()
+                df_filled[c] = df_filled[c].fillna(mode_val.iloc[0] if not mode_val.empty else "__UNKNOWN__")
+
+    # ── Label-encode every object/category column in the feature matrix
+    col_encoders: dict[str, LabelEncoder] = {}
+    df_encoded = df_filled.copy()
+    for c in df_encoded.columns:
+        if not pd.api.types.is_numeric_dtype(df_encoded[c]):
+            le = LabelEncoder()
+            df_encoded[c] = le.fit_transform(df_encoded[c].astype(str))
+            col_encoders[c] = le
+
+    for target_col in cols_with_nulls:
+        null_mask    = df[target_col].isnull()
+        known_mask   = ~null_mask
+        n_known      = known_mask.sum()
+
+        # Fallback if too few training samples
+        if n_known < 10:
+            if pd.api.types.is_numeric_dtype(df[target_col]):
+                df.loc[null_mask, target_col] = df[target_col].median()
+            else:
+                mode_val = df[target_col].mode()
+                df.loc[null_mask, target_col] = mode_val.iloc[0] if not mode_val.empty else "__UNKNOWN__"
+            continue
+
+        feature_cols = [c for c in df.columns if c != target_col]
+        X_train = df_encoded.loc[known_mask, feature_cols].values
+        X_pred  = df_encoded.loc[null_mask,  feature_cols].values
+
+        is_numeric_target = pd.api.types.is_numeric_dtype(df[target_col])
+
+        if is_numeric_target:
+            y_train = df.loc[known_mask, target_col].values
+            model   = RandomForestRegressor(
+                n_estimators=n_estimators,
+                random_state=random_state,
+                n_jobs=-1,
+            )
+            model.fit(X_train, y_train)
+            df.loc[null_mask, target_col] = model.predict(X_pred)
+        else:
+            # Encode target labels for classification
+            le_target = LabelEncoder()
+            y_train   = le_target.fit_transform(
+                df.loc[known_mask, target_col].astype(str)
+            )
+            model = RandomForestClassifier(
+                n_estimators=n_estimators,
+                random_state=random_state,
+                n_jobs=-1,
+            )
+            model.fit(X_train, y_train)
+            predicted_encoded = model.predict(X_pred)
+            df.loc[null_mask, target_col] = le_target.inverse_transform(predicted_encoded)
+
+        # Refresh the encoded feature matrix for the next column
+        df_encoded[target_col] = df_encoded.index.map(
+            lambda i: df.at[i, target_col]
+            if not pd.isnull(df.at[i, target_col])
+            else df_encoded.at[i, target_col]
+        )
+        if target_col in col_encoders:
+            try:
+                df_encoded[target_col] = col_encoders[target_col].transform(
+                    df[target_col].astype(str)
+                )
+            except ValueError:
+                # Unseen labels — just leave the numeric encoding as-is
+                pass
+
     return df
 
 
@@ -752,13 +855,14 @@ def ask_config(df: pd.DataFrame, file_path: str) -> dict:
     missing_method = questionary.select(
         "Missing value strategy:",
         choices=[
-            questionary.Choice("mean           — fill with column mean",        "mean"),
-            questionary.Choice("median         — fill with column median",      "median"),
-            questionary.Choice("most_frequent  — fill with most common value",  "most_frequent"),
-            questionary.Choice("constant       — fill with a fixed value",      "constant"),
-            questionary.Choice("ffill          — forward fill",                 "ffill"),
-            questionary.Choice("bfill          — backward fill",                "bfill"),
-            questionary.Choice("drop           — drop rows with missing values","drop"),
+            questionary.Choice("mean           — fill with column mean",                   "mean"),
+            questionary.Choice("median         — fill with column median",                 "median"),
+            questionary.Choice("most_frequent  — fill with most common value",             "most_frequent"),
+            questionary.Choice("constant       — fill with a fixed value",                 "constant"),
+            questionary.Choice("ffill          — forward fill",                            "ffill"),
+            questionary.Choice("bfill          — backward fill",                           "bfill"),
+            questionary.Choice("drop           — drop rows with missing values",           "drop"),
+            questionary.Choice("random_forest  — predict missing values with Random Forest", "random_forest"),
         ],
         style=Q_STYLE,
     ).ask()
@@ -873,10 +977,17 @@ def ask_config(df: pd.DataFrame, file_path: str) -> dict:
 #  Run pipeline with live progress
 # ─────────────────────────────────────────────────────────────
 
+def _missing_step(d: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    """Dispatch to the correct missing-value handler based on cfg."""
+    if cfg["missing_method"] == "random_forest":
+        return handle_missing_rf(d)
+    return handle_missing(d, cfg["missing_method"], cfg["fill_const"])
+
+
 def run_pipeline(df: pd.DataFrame, cfg: dict):
     steps = [
         ("Protecting target column",  None),
-        ("Handling missing values",   lambda d: handle_missing(d, cfg["missing_method"], cfg["fill_const"])),
+        ("Handling missing values",   lambda d: _missing_step(d, cfg)),
         ("Encoding categorical cols", lambda d: encode_features(d, cfg["encoding_type"]) if cfg["encoding_type"] else d),
         ("Removing outliers",         lambda d: handle_outliers(d, cfg["outlier_method"])),
         ("Feature selection",         lambda d: feature_selection(d, cfg["var_thresh"])),
