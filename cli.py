@@ -11,10 +11,12 @@ Run:
 """
 
 import os
+import re
 import sys
 import json
 import time
 import argparse
+import requests
 
 import numpy as np
 import pandas as pd
@@ -35,6 +37,7 @@ from sklearn.preprocessing import (
 )
 from sklearn.covariance import EllipticEnvelope
 from sklearn.feature_selection import VarianceThreshold
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 
 # ─────────────────────────────────────────────────────────────
 #  Console & Style setup
@@ -71,6 +74,108 @@ def handle_missing(df, method, fill_value=None):
         return df.bfill()
     elif method == "drop":
         return df.dropna()
+    return df
+
+
+def handle_missing_rf(df: pd.DataFrame, n_estimators: int = 100, random_state: int = 42) -> pd.DataFrame:
+    """Fill missing values using Random Forest imputation.
+
+    For each column that contains NaN values:
+      - Numeric columns  → RandomForestRegressor predicts the missing values.
+      - Object / category columns → RandomForestClassifier predicts the missing values.
+
+    The remaining columns are used as features. Any missing values in those
+    *feature* columns are temporarily filled with their median (numeric) or
+    most-frequent value (categorical) so the RF can be trained without further
+    cascading NaN issues.
+
+    Falls back to median / mode imputation for a column if there are fewer than
+    10 complete (non-NaN) rows available to train the model.
+    """
+    df = df.copy()
+    cols_with_nulls = [c for c in df.columns if df[c].isnull().any()]
+
+    if not cols_with_nulls:
+        return df
+
+    # ── Build a "working" copy where every cell is filled (used as feature matrix)
+    df_filled = df.copy()
+    for c in df.columns:
+        if df_filled[c].isnull().any():
+            if pd.api.types.is_numeric_dtype(df_filled[c]):
+                df_filled[c] = df_filled[c].fillna(df_filled[c].median())
+            else:
+                mode_val = df_filled[c].mode()
+                df_filled[c] = df_filled[c].fillna(mode_val.iloc[0] if not mode_val.empty else "__UNKNOWN__")
+
+    # ── Label-encode every object/category column in the feature matrix
+    col_encoders: dict[str, LabelEncoder] = {}
+    df_encoded = df_filled.copy()
+    for c in df_encoded.columns:
+        if not pd.api.types.is_numeric_dtype(df_encoded[c]):
+            le = LabelEncoder()
+            df_encoded[c] = le.fit_transform(df_encoded[c].astype(str))
+            col_encoders[c] = le
+
+    for target_col in cols_with_nulls:
+        null_mask    = df[target_col].isnull()
+        known_mask   = ~null_mask
+        n_known      = known_mask.sum()
+
+        # Fallback if too few training samples
+        if n_known < 10:
+            if pd.api.types.is_numeric_dtype(df[target_col]):
+                df.loc[null_mask, target_col] = df[target_col].median()
+            else:
+                mode_val = df[target_col].mode()
+                df.loc[null_mask, target_col] = mode_val.iloc[0] if not mode_val.empty else "__UNKNOWN__"
+            continue
+
+        feature_cols = [c for c in df.columns if c != target_col]
+        X_train = df_encoded.loc[known_mask, feature_cols].values
+        X_pred  = df_encoded.loc[null_mask,  feature_cols].values
+
+        is_numeric_target = pd.api.types.is_numeric_dtype(df[target_col])
+
+        if is_numeric_target:
+            y_train = df.loc[known_mask, target_col].values
+            model   = RandomForestRegressor(
+                n_estimators=n_estimators,
+                random_state=random_state,
+                n_jobs=-1,
+            )
+            model.fit(X_train, y_train)
+            df.loc[null_mask, target_col] = model.predict(X_pred)
+        else:
+            # Encode target labels for classification
+            le_target = LabelEncoder()
+            y_train   = le_target.fit_transform(
+                df.loc[known_mask, target_col].astype(str)
+            )
+            model = RandomForestClassifier(
+                n_estimators=n_estimators,
+                random_state=random_state,
+                n_jobs=-1,
+            )
+            model.fit(X_train, y_train)
+            predicted_encoded = model.predict(X_pred)
+            df.loc[null_mask, target_col] = le_target.inverse_transform(predicted_encoded)
+
+        # Refresh the encoded feature matrix for the next column
+        df_encoded[target_col] = df_encoded.index.map(
+            lambda i: df.at[i, target_col]
+            if not pd.isnull(df.at[i, target_col])
+            else df_encoded.at[i, target_col]
+        )
+        if target_col in col_encoders:
+            try:
+                df_encoded[target_col] = col_encoders[target_col].transform(
+                    df[target_col].astype(str)
+                )
+            except ValueError:
+                # Unseen labels — just leave the numeric encoding as-is
+                pass
+
     return df
 
 
@@ -158,6 +263,535 @@ def print_banner():
 
 
 # ─────────────────────────────────────────────────────────────
+#  Interactive Cell Editor
+# ─────────────────────────────────────────────────────────────
+
+DEFAULT_OLLAMA_MODEL = "llama3.2:max_context"
+OLLAMA_BASE_URL      = "http://localhost:11434"
+
+
+def select_and_edit_cells(df: pd.DataFrame) -> pd.DataFrame:
+    """Interactive cell-level editor: select column + row index, inspect context, edit."""
+    console.print(Rule("[bold cyan]Cell Editor[/bold cyan]"))
+    console.print("[dim]Select individual cells to inspect and edit before preprocessing.[/dim]\n")
+
+    col_names = list(df.columns)
+
+    while True:
+        action = questionary.select(
+            "Cell Editor — what would you like to do?",
+            choices=[
+                questionary.Choice("Edit a cell     — select column + row", "edit"),
+                questionary.Choice("View a region   — show rows around an index", "view"),
+                questionary.Choice("Done editing    — continue to config", "done"),
+            ],
+            style=Q_STYLE,
+        ).ask()
+
+        if action == "done" or action is None:
+            break
+
+        # ── Column selection ──────────────────────────────────
+        col = questionary.autocomplete(
+            "Column name:",
+            choices=col_names,
+            style=Q_STYLE,
+            validate=lambda v: v in col_names or f"Choose one of: {', '.join(col_names[:8])}…",
+        ).ask()
+        if col is None:
+            break
+
+        # ── Row index selection ───────────────────────────────
+        row_str = questionary.text(
+            f"Row index (0 – {len(df) - 1}):",
+            style=Q_STYLE,
+            validate=lambda v: (
+                True if v.isdigit() and 0 <= int(v) < len(df)
+                else f"Enter an integer between 0 and {len(df) - 1}"
+            ),
+        ).ask()
+        if row_str is None:
+            break
+        row_idx = int(row_str)
+
+        # ── Context preview ───────────────────────────────────
+        lo  = max(0, row_idx - 2)
+        hi  = min(len(df), row_idx + 3)
+        ctx = df.iloc[lo:hi][[col]].copy()
+        ctx.index.name = "row"
+
+        ctx_table = Table(
+            title=f"Column: [bold cyan]{col}[/bold cyan]  ·  rows {lo}–{hi - 1}",
+            box=box.ROUNDED, border_style="dim cyan", header_style="bold cyan",
+        )
+        ctx_table.add_column("Row",   style="dim",        width=8)
+        ctx_table.add_column("Value", style="bold white", no_wrap=True)
+        for r, (ridx, row) in enumerate(ctx.iterrows()):
+            val_str  = str(row[col])
+            is_sel   = ridx == row_idx
+            row_text = f"{'→ ' if is_sel else '  '}{ridx}"
+            val_text = val_str[:80]
+            if is_sel:
+                ctx_table.add_row(
+                    f"[bold yellow]{row_text}[/bold yellow]",
+                    f"[bold yellow]{val_text}[/bold yellow]",
+                )
+            else:
+                ctx_table.add_row(row_text, val_text)
+        console.print(ctx_table)
+        console.print()
+
+        current_val = df.at[row_idx, col]
+        console.print(f"  [dim]Current value:[/dim]  [bold white]{current_val!r}[/bold white]  "
+                      f"[dim](dtype: {df[col].dtype})[/dim]")
+        console.print()
+
+        if action == "view":
+            continue
+
+        # ── Edit action ───────────────────────────────────────
+        edit_action = questionary.select(
+            "What would you like to do with this cell?",
+            choices=[
+                questionary.Choice("Overwrite   — enter a new value",          "overwrite"),
+                questionary.Choice("Set to NaN  — mark as missing",            "nan"),
+                questionary.Choice("Skip        — leave unchanged",            "skip"),
+            ],
+            style=Q_STYLE,
+        ).ask()
+
+        if edit_action == "overwrite":
+            new_val_str = questionary.text(
+                "New value:",
+                default=str(current_val),
+                style=Q_STYLE,
+            ).ask()
+            if new_val_str is not None:
+                # Try to cast to the column's original dtype
+                try:
+                    if pd.api.types.is_integer_dtype(df[col]):
+                        new_val = int(new_val_str)
+                    elif pd.api.types.is_float_dtype(df[col]):
+                        new_val = float(new_val_str)
+                    else:
+                        new_val = new_val_str
+                    df.at[row_idx, col] = new_val
+                    console.print(
+                        f"  [bold green]✓[/bold green]  "
+                        f"[cyan]{col}[/cyan][{row_idx}]  "
+                        f"← [bold white]{new_val!r}[/bold white]\n"
+                    )
+                except (ValueError, TypeError) as exc:
+                    console.print(f"  [bold red]✗[/bold red]  Could not cast value: {exc}\n")
+
+        elif edit_action == "nan":
+            df.at[row_idx, col] = np.nan
+            console.print(
+                f"  [bold green]✓[/bold green]  "
+                f"[cyan]{col}[/cyan][{row_idx}] set to [yellow]NaN[/yellow]\n"
+            )
+
+    console.print(f"[bold green]✓[/bold green]  Cell editing complete.  "
+                  f"[dim]DataFrame shape: {df.shape[0]:,} × {df.shape[1]}[/dim]\n")
+    return df
+
+
+# ─────────────────────────────────────────────────────────────
+#  Ollama LLM Assistant helpers
+# ─────────────────────────────────────────────────────────────
+
+def _list_ollama_models() -> list[str]:
+    """Return names of locally available Ollama models."""
+    try:
+        r = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
+        if r.ok:
+            return [m["name"] for m in r.json().get("models", [])]
+    except Exception:
+        pass
+    return []
+
+
+def build_data_snapshot(df: pd.DataFrame, max_rows: int = 3) -> str:
+    """Compact text summary of df — injected as the LLM system context."""
+    lines = [
+        f"DataFrame shape: {df.shape[0]:,} rows × {df.shape[1]} columns\n",
+        "Column info (name | dtype | null_count | sample_value):",
+    ]
+    for col in df.columns:
+        sample = df[col].dropna().iloc[0] if df[col].dropna().shape[0] else "—"
+        lines.append(
+            f"  {col!r:<28} {str(df[col].dtype):<10} "
+            f"nulls={df[col].isnull().sum():<5} sample={str(sample)[:30]!r}"
+        )
+
+    # Cap the inline preview to keep the system prompt concise
+    n = min(max_rows, len(df))
+    lines.append(f"\nFirst {n} rows (truncated to 40 chars per cell):")
+    try:
+        preview = df.head(n).to_string(max_colwidth=40)
+        lines.append(preview)
+    except Exception:
+        lines.append("(could not render preview)")
+
+    return "\n".join(lines)
+
+
+# ─── Restricted eval whitelist ────────────────────────────────────────────────
+_BLOCKED = re.compile(
+    r"\b(os|sys|subprocess|open|exec|eval|compile|__import__|importlib"
+    r"|socket|shutil|pathlib|glob|requests)\b"
+)
+
+
+def query_data_tool(df: pd.DataFrame, expression: str) -> str:
+    """Safely evaluate a pandas expression against the live DataFrame."""
+    if _BLOCKED.search(expression):
+        return "[BLOCKED] Expression contains disallowed identifiers."
+    try:
+        # Provide `df` and common aliases in the eval namespace
+        ns  = {"df": df, "pd": pd, "np": np}
+        result = eval(expression, {"__builtins__": {}}, ns)  # noqa: S307
+        return str(result)
+    except Exception as exc:
+        return f"[ERROR] {type(exc).__name__}: {exc}"
+
+
+def edit_cell_tool(
+    df: pd.DataFrame,
+    column: str,
+    row_index: int | str,
+    new_value: str,
+) -> tuple[str, object, object]:
+    """Write *new_value* into df.at[row_index, column].
+
+    Returns (message, old_value, cast_new_value).  The caller is responsible
+    for recording the audit entry; this function only mutates `df`.
+    """
+    # ── Validate column ───────────────────────────────────────
+    if column not in df.columns:
+        close = [c for c in df.columns if column.lower() in c.lower()]
+        hint  = f"  Did you mean: {close[:3]}?" if close else ""
+        return (
+            f"[ERROR] Column {column!r} not found.{hint}",
+            None,
+            None,
+        )
+
+    # ── Validate row index ────────────────────────────────────
+    try:
+        row_idx = int(row_index)
+    except (ValueError, TypeError):
+        return (f"[ERROR] row_index must be an integer, got {row_index!r}.", None, None)
+
+    if not (0 <= row_idx < len(df)):
+        return (
+            f"[ERROR] row_index {row_idx} is out of range (0 – {len(df) - 1}).",
+            None,
+            None,
+        )
+
+    old_val = df.at[row_idx, column]
+
+    # ── Dtype-aware cast ──────────────────────────────────────
+    try:
+        if new_value.strip().lower() in ("nan", "null", "none", ""):
+            cast_val = np.nan
+        elif pd.api.types.is_integer_dtype(df[column]):
+            cast_val = int(float(new_value))   # int(float()) handles "3.0"
+        elif pd.api.types.is_float_dtype(df[column]):
+            cast_val = float(new_value)
+        elif pd.api.types.is_bool_dtype(df[column]):
+            cast_val = new_value.strip().lower() in ("true", "1", "yes")
+        else:
+            cast_val = new_value                # keep as string
+    except (ValueError, TypeError) as exc:
+        return (f"[ERROR] Cannot cast {new_value!r} to {df[column].dtype}: {exc}", None, None)
+
+    df.at[row_idx, column] = cast_val
+    msg = (
+        f"✓ [{column}][row {row_idx}]  "
+        f"{old_val!r}  →  {cast_val!r}  "
+        f"(dtype: {df[column].dtype})"
+    )
+    return (msg, old_val, cast_val)
+
+
+# ─── Tool-call detector (JSON code block in model reply) ─────────────────────
+_TOOL_RE = re.compile(
+    r"```(?:json)?\s*(\{.*?\})\s*```",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+_KNOWN_TOOLS = {"query_data", "edit_cell"}
+
+
+def _extract_tool_call(text: str) -> dict | None:
+    """Look for a JSON tool-call block in the model's reply.
+
+    Accepts any tool whose name is in _KNOWN_TOOLS.
+    """
+    match = _TOOL_RE.search(text)
+    if not match:
+        return None
+    try:
+        obj = json.loads(match.group(1))
+        if isinstance(obj, dict) and obj.get("name") in _KNOWN_TOOLS:
+            return obj
+    except json.JSONDecodeError:
+        pass
+    return None
+
+
+def ollama_chat_loop(df: pd.DataFrame, stage_label: str = "Data") -> None:
+    """Interactive LLM chat loop powered by a local Ollama model."""
+    # ── Model selection ───────────────────────────────────────
+    available = _list_ollama_models()
+    if not available:
+        console.print(
+            "[bold red]✗[/bold red]  No Ollama models found. "
+            "Make sure Ollama is running ([cyan]ollama serve[/cyan]).\n"
+        )
+        return
+
+    default_model = (
+        DEFAULT_OLLAMA_MODEL
+        if DEFAULT_OLLAMA_MODEL in available
+        else available[0]
+    )
+
+    console.print(Rule(f"[bold cyan]LLM Assistant — {stage_label}[/bold cyan]"))
+    console.print(
+        "[dim]The assistant can inspect your data with the "
+        "[bold white]query_data[/bold white] tool.\n"
+        "Type [bold white]exit[/bold white] or [bold white]quit[/bold white] to leave.[/dim]\n"
+    )
+
+    model = questionary.select(
+        "Select Ollama model:",
+        choices=available,
+        default=default_model,
+        style=Q_STYLE,
+    ).ask()
+    if model is None:
+        return
+
+    # ── System prompt ─────────────────────────────────────────
+    snapshot = build_data_snapshot(df)
+
+    query_tool_spec = json.dumps({
+        "name": "query_data",
+        "description": (
+            "Run a pandas expression on the live DataFrame `df` and return "
+            "the result as a string. Use this to inspect or answer questions "
+            "about the data. Always reference the DataFrame as `df`."
+        ),
+        "parameters": {
+            "expression": "A valid pandas expression string, e.g. \"df['Age'].describe()\""
+        },
+    }, indent=2)
+
+    edit_tool_spec = json.dumps({
+        "name": "edit_cell",
+        "description": (
+            "Write a new value into a single cell of the live DataFrame. "
+            "Use this when the user explicitly asks to change, fix, replace, "
+            "or set a specific cell value. The change is permanent for this session."
+        ),
+        "parameters": {
+            "column":    "Exact column name (string) — must match a column in the dataset.",
+            "row_index": "Zero-based integer row index of the cell to edit.",
+            "new_value": (
+                "New value as a string. For NaN/null write 'nan'. "
+                "The tool will cast it to the column's dtype automatically."
+            ),
+        },
+    }, indent=2)
+
+    system_prompt = (
+        f"You are DataPrepX Assistant, an expert data analyst helping the user understand "
+        f"and preprocess their dataset ({stage_label} stage).\n\n"
+        f"=== DATASET SNAPSHOT ===\n{snapshot}\n\n"
+        f"=== TOOLS AVAILABLE ===\n"
+        f"You have access to TWO tools:\n\n"
+        f"1. query_data — inspect the data:\n{query_tool_spec}\n\n"
+        f"2. edit_cell  — change a cell value:\n{edit_tool_spec}\n\n"
+        f"To call a tool, respond with ONLY a JSON code block (no other text):\n"
+        f"```json\n"
+        f'{{"name": "query_data", "parameters": {{"expression": "<pandas_expr>"}}}}\n'
+        f"```\n"
+        f"or\n"
+        f"```json\n"
+        f'{{"name": "edit_cell", "parameters": {{"column": "<col>", "row_index": <int>, "new_value": "<val>"}}}}\n'
+        f"```\n\n"
+        f"Rules:\n"
+        f"- Only ONE tool call per reply.\n"
+        f"- After receiving the tool result, reply in plain English confirming what happened.\n"
+        f"- Use query_data FIRST to verify the current value before editing if unsure.\n"
+        f"- If the user's question needs no tool, answer directly from the snapshot.\n"
+        f"- NEVER invent column names or row indices — use only what exists in the snapshot."
+    )
+
+    messages:   list[dict] = [{"role": "system", "content": system_prompt}]
+    _llm_edits: list[dict] = []   # audit log of every cell edit made by the LLM
+
+    console.print(f"  [bold green]●[/bold green]  Model: [cyan]{model}[/cyan]")
+    console.print(
+        "  [dim]Tools:[/dim] [yellow]query_data[/yellow]  [dim]·[/dim]  "
+        "[yellow]edit_cell[/yellow]\n"
+    )
+
+    # ── Streaming helper (defined once, captures `model` from closure) ────
+    def _stream_ollama(msgs: list[dict], print_live: bool = False) -> str:
+        """Call Ollama with stream=True.  Each chunk resets the per-read timeout
+        so we never block waiting for a full response.  When print_live=True
+        tokens are written to stdout as they arrive."""
+        full = ""
+        try:
+            r = requests.post(
+                f"{OLLAMA_BASE_URL}/api/chat",
+                json={"model": model, "messages": msgs, "stream": True},
+                timeout=(15, 300),   # (connect_timeout, per-chunk read timeout)
+                stream=True,
+            )
+            r.raise_for_status()
+            for raw_line in r.iter_lines():
+                if not raw_line:
+                    continue
+                try:
+                    chunk = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                token = chunk.get("message", {}).get("content", "")
+                full += token
+                if print_live and token:
+                    sys.stdout.write(token)
+                    sys.stdout.flush()
+                if chunk.get("done"):
+                    break
+        except requests.exceptions.ConnectionError:
+            full = "[ERROR] Cannot connect to Ollama. Is `ollama serve` running?"
+        except Exception as exc:
+            full = f"[ERROR] {type(exc).__name__}: {exc}"
+        return full
+
+    # ── Chat loop ─────────────────────────────────────────────
+    while True:
+        try:
+            user_input = questionary.text(
+                "You:",
+                style=Q_STYLE,
+                multiline=False,
+            ).ask()
+        except (EOFError, KeyboardInterrupt):
+            break
+
+        if user_input is None or user_input.strip().lower() in ("exit", "quit", ""):
+            if user_input is None or user_input.strip().lower() in ("exit", "quit"):
+                console.print("[dim]Leaving LLM assistant.[/dim]\n")
+            break
+
+        messages.append({"role": "user", "content": user_input.strip()})
+
+        # ── First model call (silent — tool-call detection) ───────────────
+        with console.status(f"[cyan]{model} is thinking…[/cyan]"):
+            reply = _stream_ollama(messages, print_live=False)
+
+        # ── Tool-call handling ────────────────────────────────────────────
+        tool_call = _extract_tool_call(reply)
+
+        if tool_call and tool_call["name"] == "query_data":
+            expr = tool_call.get("parameters", {}).get("expression", "")
+            console.print(
+                f"  [dim]⚙ tool:[/dim] [yellow]query_data[/yellow]([cyan]{expr[:80]}[/cyan])"
+            )
+            with console.status("[cyan]Running query…[/cyan]"):
+                tool_result = query_data_tool(df, expr)
+
+            messages.append({"role": "assistant", "content": reply})
+            messages.append({
+                "role": "user",
+                "content": f"[Tool result for query_data({expr!r})]:\n{tool_result}",
+            })
+            console.print()
+            console.print(f"  [bold cyan]{model}:[/bold cyan]")
+            reply = _stream_ollama(messages, print_live=True)
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+        elif tool_call and tool_call["name"] == "edit_cell":
+            params    = tool_call.get("parameters", {})
+            col       = params.get("column", "")
+            row_idx   = params.get("row_index", "")
+            new_val   = str(params.get("new_value", ""))
+
+            console.print(
+                f"  [dim]⚙ tool:[/dim] [yellow]edit_cell[/yellow]("
+                f"[cyan]{col}[/cyan], row=[cyan]{row_idx}[/cyan], "
+                f"value=[cyan]{new_val[:40]!r}[/cyan])"
+            )
+            with console.status("[cyan]Applying edit…[/cyan]"):
+                tool_result, old_v, new_v = edit_cell_tool(df, col, row_idx, new_val)
+
+            # Record in audit log (only successful edits)
+            if old_v is not None:
+                _llm_edits.append({
+                    "column":    col,
+                    "row_index": int(row_idx),
+                    "old_value": old_v,
+                    "new_value": new_v,
+                })
+
+            messages.append({"role": "assistant", "content": reply})
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"[Tool result for edit_cell(column={col!r}, "
+                    f"row_index={row_idx}, new_value={new_val!r})]:\n{tool_result}"
+                ),
+            })
+            console.print()
+            console.print(f"  [bold cyan]{model}:[/bold cyan]")
+            reply = _stream_ollama(messages, print_live=True)
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+        else:
+            # ── No tool — stream the answer live ──────────────────────────
+            console.print()
+            console.print(f"  [bold cyan]{model}:[/bold cyan]")
+            reply = _stream_ollama(messages, print_live=True)
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+        console.print()
+        messages.append({"role": "assistant", "content": reply})
+
+    # ── Edit audit log ────────────────────────────────────────────────────
+    if _llm_edits:
+        console.print(Rule("[bold yellow]LLM Edit Log[/bold yellow]"))
+        edit_table = Table(
+            title=f"{len(_llm_edits)} cell(s) changed by the LLM",
+            box=box.ROUNDED,
+            border_style="yellow",
+            header_style="bold yellow",
+        )
+        edit_table.add_column("Column",    style="cyan",         no_wrap=True)
+        edit_table.add_column("Row",       style="dim",          justify="right", width=7)
+        edit_table.add_column("Old Value", style="bold red",     no_wrap=True)
+        edit_table.add_column("New Value", style="bold green",   no_wrap=True)
+        for entry in _llm_edits:
+            edit_table.add_row(
+                entry["column"],
+                str(entry["row_index"]),
+                str(entry["old_value"])[:40],
+                str(entry["new_value"])[:40],
+            )
+        console.print(edit_table)
+        console.print()
+
+
+# ─────────────────────────────────────────────────────────────
 #  Dataset preview
 # ─────────────────────────────────────────────────────────────
 
@@ -221,13 +855,14 @@ def ask_config(df: pd.DataFrame, file_path: str) -> dict:
     missing_method = questionary.select(
         "Missing value strategy:",
         choices=[
-            questionary.Choice("mean           — fill with column mean",        "mean"),
-            questionary.Choice("median         — fill with column median",      "median"),
-            questionary.Choice("most_frequent  — fill with most common value",  "most_frequent"),
-            questionary.Choice("constant       — fill with a fixed value",      "constant"),
-            questionary.Choice("ffill          — forward fill",                 "ffill"),
-            questionary.Choice("bfill          — backward fill",                "bfill"),
-            questionary.Choice("drop           — drop rows with missing values","drop"),
+            questionary.Choice("mean           — fill with column mean",                   "mean"),
+            questionary.Choice("median         — fill with column median",                 "median"),
+            questionary.Choice("most_frequent  — fill with most common value",             "most_frequent"),
+            questionary.Choice("constant       — fill with a fixed value",                 "constant"),
+            questionary.Choice("ffill          — forward fill",                            "ffill"),
+            questionary.Choice("bfill          — backward fill",                           "bfill"),
+            questionary.Choice("drop           — drop rows with missing values",           "drop"),
+            questionary.Choice("random_forest  — predict missing values with Random Forest", "random_forest"),
         ],
         style=Q_STYLE,
     ).ask()
@@ -342,10 +977,17 @@ def ask_config(df: pd.DataFrame, file_path: str) -> dict:
 #  Run pipeline with live progress
 # ─────────────────────────────────────────────────────────────
 
+def _missing_step(d: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    """Dispatch to the correct missing-value handler based on cfg."""
+    if cfg["missing_method"] == "random_forest":
+        return handle_missing_rf(d)
+    return handle_missing(d, cfg["missing_method"], cfg["fill_const"])
+
+
 def run_pipeline(df: pd.DataFrame, cfg: dict):
     steps = [
         ("Protecting target column",  None),
-        ("Handling missing values",   lambda d: handle_missing(d, cfg["missing_method"], cfg["fill_const"])),
+        ("Handling missing values",   lambda d: _missing_step(d, cfg)),
         ("Encoding categorical cols", lambda d: encode_features(d, cfg["encoding_type"]) if cfg["encoding_type"] else d),
         ("Removing outliers",         lambda d: handle_outliers(d, cfg["outlier_method"])),
         ("Feature selection",         lambda d: feature_selection(d, cfg["var_thresh"])),
@@ -550,6 +1192,24 @@ def main():
     if show_preview:
         preview_dataset(df)
 
+    # ── Cell editor ───────────────────────────────────────────
+    want_edit = questionary.confirm(
+        "Edit individual cells before preprocessing?",
+        default=False,
+        style=Q_STYLE,
+    ).ask()
+    if want_edit:
+        df = select_and_edit_cells(df)
+
+    # ── LLM assistant (raw data) ──────────────────────────────
+    want_llm_raw = questionary.confirm(
+        "Chat with the LLM assistant about this (raw) data?",
+        default=False,
+        style=Q_STYLE,
+    ).ask()
+    if want_llm_raw:
+        ollama_chat_loop(df, stage_label="Raw Data")
+
     # ── Config wizard ─────────────────────────────────────────
     cfg = ask_config(df, file_path)
 
@@ -588,6 +1248,15 @@ def main():
 
     # ── Summary ───────────────────────────────────────────────
     print_summary(df_out, original_shape, cfg, saved)
+
+    # ── LLM assistant (processed data) ───────────────────────
+    want_llm_post = questionary.confirm(
+        "Chat with the LLM assistant about the processed data?",
+        default=False,
+        style=Q_STYLE,
+    ).ask()
+    if want_llm_post:
+        ollama_chat_loop(df_out, stage_label="Processed Data")
 
 
 if __name__ == "__main__":
