@@ -1,10 +1,10 @@
 {
-    "source_file": "/home/trinath/Desktop/temp/DataPrepX-A-tool-for-Enhancing-quality-through-pre-processing-technique-in-Data-Analytics/test_dataset.csv",
+    "source_file": "test_dataset.csv",
     "target_column": "",
-    "missing_method": "mean",
+    "missing_method": "random_forest",
     "fill_value": "",
-    "encoding": "Label",
-    "scaler": "Standard",
+    "encoding": null,
+    "scaler": null,
     "outlier_method": "IQR",
     "variance_threshold": 0.0,
     "output_formats": [
