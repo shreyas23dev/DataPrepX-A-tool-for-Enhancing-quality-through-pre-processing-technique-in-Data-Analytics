@@ -74,5 +74,5 @@ python cli.py
 
 ## 👥 Developed By
 
-**Shreyas A**  and **Trinath Bhattacharya @https://github.com/CodingLangur **
+**Shreyas A**  and **Trinath Bhattacharya @CodingLangur **
 
