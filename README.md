@@ -1,5 +1,5 @@
 # [[DataPrepX](https://intelligent-data-prep.lovable.app/)] — Intelligent Terminal-based Data Preprocessing
-![DataPrepX](/home/shreyas/Downloads/prep.png)
+![prep.png](https://github.com/shreyas23dev/DataPrepX-A-tool-for-Enhancing-quality-through-pre-processing-technique-in-Data-Analytics/blob/LLM_changes/prep.png)
 
 DataPrepX is an open-source, interactive data-preprocessing toolkit designed to streamline the transition from raw data to model-ready features. Built for power users and automation pipelines, it provides a guided CLI experience that ensures reproducibility through JSON configuration tracking.
 
