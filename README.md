@@ -71,8 +71,7 @@ python cli.py
 | **Analysis** | `ydata-profiling` |
 
 ---
-
 ## 👥 Developed By
 
-**Shreyas A**  and **Trinath Bhattacharya @CodingLangur **
-
+**Shreyas A** — [github.com/shreyas23dev](https://github.com/shreyas23dev)  
+**Trinath Bhattacharya** — [github.com/CodingLangur](https://github.com/CodingLangur)
